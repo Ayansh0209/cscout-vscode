@@ -1,0 +1,181 @@
+{
+  "name": "csscout-vscode",
+  "displayName": "csscout-vscode",
+  "description": "",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.109.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "cscout.showIdentifiers",
+        "title": "Refresh CScout Identifiers"
+      },
+      {
+        "command": "cscout.openFilter",
+        "title": "Filter Identifiers",
+        "icon": {
+          "light": "resources/filter.svg",
+          "dark": "resources/filter.svg"
+        }
+      },
+      {
+        "command": "cscout.openFileFilter",
+        "title": "Filter Files",
+        "icon": {
+          "light": "resources/filter.svg",
+          "dark": "resources/filter.svg"
+        }
+      },
+      {
+        "command": "cscout.openGraphDefault",
+        "title": "Open Graph",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "cscout.openGraphWritable",
+        "title": "Writable",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "cscout.openGraphAll",
+        "title": "All",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "cscout.refreshDependencies",
+        "title": "Refresh Dependencies",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "cscout.resetDependencies",
+        "title": "Reset Focus",
+        "icon": "$(arrow-left)"
+      },
+      {
+        "command": "cscout.openFunctionFilter",
+        "title": "Filter Functions",
+        "icon": {
+          "light": "resources/filter.svg",
+          "dark": "resources/filter.svg"
+        }
+      },
+      {
+        "command": "cscout.openFunctionGraph",
+        "title": "Open Function Graph",
+        "icon": "$(eye)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "cscout",
+          "title": "CSCOUT",
+          "icon": "resources/cscout.svg"
+        }
+      ]
+    },
+    "views": {
+      "cscout": [
+        {
+          "id": "cscoutFilesView",
+          "name": "FILES"
+        },
+        {
+          "id": "cscoutIdentifiersView",
+          "name": "IDENTIFIERS"
+        },
+        {
+          "id": "cscoutDependenciesView",
+          "name": "DEPENDENCIES"
+        },
+        {
+          "id": "cscoutFunctionsView",
+          "name": "FUNCTIONS & MACROS"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "cscout.openFileFilter",
+          "when": "view == cscoutFilesView",
+          "group": "navigation"
+        },
+        {
+          "command": "cscout.refreshDependencies",
+          "when": "view == cscoutDependenciesView",
+          "group": "navigation"
+        },
+        {
+          "command": "cscout.resetDependencies",
+          "when": "view == cscoutDependenciesView",
+          "group": "navigation@2"
+        },
+        {
+          "command": "cscout.openFunctionFilter",
+          "when": "view == cscoutFunctionsView",
+          "group": "navigation"
+        },
+        {
+          "command": "cscout.openFilter",
+          "when": "view == cscoutIdentifiersView",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "cscout.openFilter",
+          "when": "view == cscoutIdentifiersView && viewItem == identifiersRoot",
+          "group": "inline"
+        },
+        {
+          "command": "cscout.openGraphDefault",
+          "when": "view == cscoutDependenciesView && viewItem == dependencyActionable",
+          "group": "inline"
+        },
+        {
+          "command": "cscout.openGraphWritable",
+          "when": "view == cscoutDependenciesView && viewItem == dependencyActionable",
+          "group": "inline"
+        },
+        {
+          "command": "cscout.openGraphAll",
+          "when": "view == cscoutDependenciesView && viewItem == dependencyActionable",
+          "group": "inline"
+        },
+        {
+          "command": "cscout.openFunctionGraph",
+          "when": "view == cscoutFunctionsView && viewItem == functionNode",
+          "group": "inline"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src",
+    "test": "vscode-test"
+  },
+  "devDependencies": {
+    "@types/mocha": "^10.0.10",
+    "@types/node": "22.x",
+    "@types/vscode": "^1.109.0",
+    "@vscode/test-cli": "^0.0.12",
+    "@vscode/test-electron": "^2.5.2",
+    "eslint": "^9.39.3",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.56.1"
+  },
+  "dependencies": {
+    "axios": "^1.13.6"
+  }
+}
