@@ -1,5 +1,11 @@
 # Prototype Overview
 
+
+
+https://github.com/user-attachments/assets/225dcfd8-c703-4c80-aa05-45bb46ebc181
+
+
+
 This prototype implements a VS Code extension that integrates with the CScout semantic analysis engine to provide structured program understanding inside the editor.
 
 The system is designed to **consume structured data (JSON)** directly from CScout rather than relying on HTML scraping as the primary mechanism. This ensures better reliability, performance, and extensibility.
@@ -121,7 +127,7 @@ sequenceDiagram
 ## Installation
 ```bash
 npm install
-npm run build
+npm run compile
 ```
 
 ## Running the Extension
@@ -324,21 +330,24 @@ cscout-vscode/
 │   │   ├── identifierProvider.ts      # Handles identifier tree + filtering
 │   │   ├── fileProvider.ts            # Manages file tree + file-level sections
 │   │   ├── funcSectionProvider.ts     # Handles functions (callers/callees + caching)
-│   │   └── dependencyProvider.ts      # Manages dependency tree + relationships
-|   |   └── CScoutViewProvider.ts      # Handles identifier tree + filtering
+│   │   ├── dependencyProvider.ts      # Manages dependency tree + relationships
+│   │   └── CScoutViewProvider.ts      # Identifier View
 │   │
 │   ├── services/                      # API layer (fetching data from CScout)
-│   │   ├── cscoutApi.ts               # Base request handler (HTTP calls)
+│   │   ├── funSection.ts              # Handle function and macros section api 
 │   │   ├── fileApi.ts                 # File-related API calls
-│   │   ├── functionApi.ts             # Function + call graph API calls
-│   │   └── dependencyApi.ts           # Dependency-related API calls
-│   │   
+│   │   ├── functionApi.ts             # Function helper api
+│   │   ├── dependencyApi.ts           # Dependency-related API calls
+│   │   └── IdentifierApi.ts           # Identifier-specific API (filters, locations)
+│   │
+│   ├── webview/                       # Webview rendering logic (graphs, UI panels)
+│   │   └── renderGraph.ts             # Reusable graph renderer (zoom + pan support)
 │   │
 │   └── extension.ts                   # Entry point (activates extension, registers commands)
 │
 ├── resources/                         # Static assets (icons, UI resources)
 ├── out/                               # Compiled JS output (build artifacts)
-└── package.json                       # Extension config (commands, views, metadata)
+├── package.json                       # Extension config (commands, views, metadata)
 ```
 
 
