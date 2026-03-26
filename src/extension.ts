@@ -6,6 +6,7 @@ import { FileProvider } from "./providers/filleProvider";
 import { DependencyProvider } from "./providers/depdencyProvider";
 import { FunctionProvider } from "./providers/funcSectionProvider";
 import { FUNCTION_FILTERS } from "./services/FunSectionapi";
+import { renderGraph } from "./webview/renderGrpah";
 export let currentIdentifierFilters: IdentifierFilters = {};
 export function activate(context: vscode.ExtensionContext) {
 
@@ -134,16 +135,15 @@ export function activate(context: vscode.ExtensionContext) {
         if (!node?.file?.id) return;
 
         const fid = node.file.id;
-        const type = node.depType; // C / F / G
-        const dir = node.dir;      // D / U
+        const type = node.depType;
+        const dir = node.dir;
 
         const gtype = mapGraphType(type);
         const n = dir;
 
         const url = `http://localhost:8081/fgraph.svg?gtype=${gtype}&f=${fid}&n=${n}&filter=${filter}`;
 
-
-        vscode.commands.executeCommand("vscode.open", vscode.Uri.parse(url));
+        renderGraph(url, `Dependency Graph`);
     }
     function mapGraphType(type: string): string {
 
@@ -271,99 +271,7 @@ export function activate(context: vscode.ExtensionContext) {
 
             const url = `http://localhost:8081/cgraph.svg?all=1&f=${node.id}&n=B`;
 
-            const panel = vscode.window.createWebviewPanel(
-                "cscoutGraph",
-                `Graph: ${node.name}`,
-                vscode.ViewColumn.One,
-                {
-                    enableScripts: true
-                }
-            );
-
-            panel.webview.html = `
-<!DOCTYPE html>
-<html>
-<head>
-    <style>
-        html, body {
-            margin: 0;
-            padding: 0;
-            overflow: hidden;
-            background: #1e1e1e;
-        }
-
-        #container {
-            width: 100vw;
-            height: 100vh;
-            cursor: grab;
-            overflow: hidden;
-        }
-
-        #container:active {
-            cursor: grabbing;
-        }
-
-        object {
-            width: 100%;
-            height: 100%;
-            pointer-events: none; /* allow drag */
-        }
-    </style>
-</head>
-<body>
-
-<div id="container">
-    <object id="svgObj" data="${url}" type="image/svg+xml"></object>
-</div>
-
-<script>
-    const container = document.getElementById('container');
-
-    let scale = 1;
-    let pos = { x: 0, y: 0 };
-    let isDragging = false;
-    let start = { x: 0, y: 0 };
-
-    container.addEventListener('wheel', (e) => {
-        e.preventDefault();
-
-        const zoomFactor = 0.1;
-        const direction = e.deltaY > 0 ? -1 : 1;
-
-        scale += direction * zoomFactor;
-        scale = Math.max(0.2, Math.min(scale, 5));
-
-        updateTransform();
-    });
-
-    container.addEventListener('mousedown', (e) => {
-        isDragging = true;
-        start.x = e.clientX - pos.x;
-        start.y = e.clientY - pos.y;
-    });
-
-    window.addEventListener('mouseup', () => {
-        isDragging = false;
-    });
-
-    window.addEventListener('mousemove', (e) => {
-        if (!isDragging) return;
-
-        pos.x = e.clientX - start.x;
-        pos.y = e.clientY - start.y;
-
-        updateTransform();
-    });
-
-    function updateTransform() {
-        container.style.transform =
-            \`translate(\${pos.x}px, \${pos.y}px) scale(\${scale})\`;
-    }
-</script>
-
-</body>
-</html>
-`;
+            renderGraph(url, `Graph: ${node.name}`);
         })
     );
 
