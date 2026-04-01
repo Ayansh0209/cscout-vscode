@@ -1,6 +1,4 @@
-import * as net from "net";
-
-import { makeRequest } from "./functionApi";
+import { requestJSON, buildQuery } from "./request";
 export const FILE_FILTERS = {
     ALL_FILES: {
         ro: 1,
@@ -81,69 +79,19 @@ export type FileQueryParams = Record<string, string | number>;
 
 
 export async function fetchFiles(params: FileQueryParams): Promise<FileItem[]> {
-    return new Promise((resolve) => {
 
-        const query = new URLSearchParams();
-        for (const key in params) {
-            query.append(key, String(params[key]));
-        }
+    try {
+        const query = buildQuery(params);
+        const path = `/api/files?${query}`;
 
-        const path = `/api/files?${query.toString()}`;
+        const data = await requestJSON(path);
 
+        return data?.files || [];
 
-        const client = net.createConnection(
-            { host: "127.0.0.1", port: 8081 },
-            () => {
-                console.log("  Connected to server");
-
-                const request =
-                    `GET ${path} HTTP/1.1\r\n` +
-                    `Host: localhost\r\n` +
-                    `Connection: close\r\n\r\n`;
-
-
-
-                client.write(request);
-            }
-        );
-
-        let rawData = "";
-
-        client.on("data", (chunk) => {
-            const str = chunk.toString();
-
-            rawData += str;
-        });
-
-        client.on("end", () => {
-            console.log("🔚 CONNECTION ENDED");
-
-            try {
-
-
-                //   Extract JSON
-                const jsonStart = rawData.indexOf("{");
-
-                if (jsonStart === -1) {
-                    console.error("  JSON NOT FOUND IN RESPONSE");
-                    return resolve([]);
-                }
-
-                const jsonString = rawData.slice(jsonStart);
-                const parsed = JSON.parse(jsonString);
-                resolve(parsed.files || []);
-
-            } catch (err) {
-                console.error("  JSON PARSE ERROR:", err);
-                resolve([]);
-            }
-        });
-
-        client.on("error", (err) => {
-            console.error("  SOCKET ERROR:", err);
-            resolve([]);
-        });
-    });
+    } catch (err) {
+        console.error("Fetch files error:", err);
+        return [];
+    }
 }
 
 
@@ -162,10 +110,8 @@ export async function fetchFileFunctions(fid: number): Promise<FileFunction[]> {
     const base = `fid=${fid}&match=L&ncallerop=0&ncallers=&defined=1&qi=x&n=Functions`;
 
 const [project, file] = await Promise.all([
-    makeRequest(`/api/functions?${base}&pscope=1`),
-    makeRequest(`/api/functions?${base}&fscope=1`)
-
-
+    requestJSON(`/api/functions?${base}&pscope=1`),
+    requestJSON(`/api/functions?${base}&fscope=1`)
 ]);
 
        const results: FileFunction[] = [
@@ -203,85 +149,42 @@ export interface FileInclude {
 }
 
 export async function fetchFileIncludes(fid: number): Promise<FileInclude[]> {
-    return new Promise((resolve) => {
 
-        console.log("Fetching includes for fid:", fid);
+    console.log("Fetching includes for fid:", fid);
 
+    try {
         const path = `/api/file/includes?id=${fid}&includes=1`;
 
-        console.log("Request path:", path);
+        const data = await requestJSON(path);
 
-        const client = net.createConnection(
-            { host: "127.0.0.1", port: 8081 },
-            () => {
-                console.log("Connected to server");
+        if (!data) return [];
 
-                const request =
-                    `GET ${path} HTTP/1.1\r\n` +
-                    `Host: localhost\r\n` +
-                    `Connection: close\r\n\r\n`;
+        const mapped: FileInclude[] = data.map((inc: any) => {
 
-                client.write(request);
-            }
-        );
+            const tags: string[] = [];
 
-        let rawData = "";
+            if (inc.direct) tags.push("direct");
+            else tags.push("indirect");
 
-        client.on("data", (chunk) => {
-            const str = chunk.toString();
-            rawData += str;
+            if (inc.writable) tags.push("writable");
+            if (inc.unused) tags.push("unused");
+
+            return {
+                file: inc.file,
+                fileid: inc.fileid,
+                direct: inc.direct,
+                writable: inc.writable,
+                unused: inc.unused,
+                tags
+            };
         });
 
-        client.on("end", () => {
-            console.log("Connection ended");
+        console.log("Final mapped includes:", mapped);
 
-            try {
-                const jsonStart = rawData.indexOf("[");
+        return mapped;
 
-                if (jsonStart === -1) {
-                    console.error("JSON not found in response");
-                    return resolve([]);
-                }
-
-                const jsonString = rawData.slice(jsonStart);
-                const parsed = JSON.parse(jsonString);
-
-                console.log("Parsed includes:", parsed);
-
-                const mapped: FileInclude[] = parsed.map((inc: any) => {
-
-                    const tags: string[] = [];
-
-                    if (inc.direct) tags.push("direct");
-                    else tags.push("indirect");
-
-                    if (inc.writable) tags.push("writable");
-
-                    if (inc.unused) tags.push("unused");
-
-                    return {
-                        file: inc.file,
-                        fileid: inc.fileid,
-                        direct: inc.direct,
-                        writable: inc.writable,
-                        unused: inc.unused,
-                        tags
-                    };
-                });
-
-                console.log("Final mapped includes:", mapped);
-
-                resolve(mapped);
-
-            } catch (err) {
-                console.error("JSON parse error:", err);
-                resolve([]);
-            }
-        });
-
-        client.on("error", (err) => {
-            console.error("Socket error:", err);
-            resolve([]);
-        });
-    });
+    } catch (err) {
+        console.error("Includes fetch error:", err);
+        return [];
+    }
 }

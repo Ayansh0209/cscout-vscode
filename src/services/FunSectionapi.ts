@@ -1,4 +1,4 @@
-// import { makeRequest } from "./functionApi"; 
+import { requestJSON, buildQuery } from "./request";
 
 export interface CScoutFunction {
     function: string;
@@ -66,64 +66,20 @@ export async function fetchFunctions(
     console.log("[CScout] Fetching functions with params:", params);
 
     try {
-        const query = new URLSearchParams();
+        const query = buildQuery(params);
+        const path = `/api/functions?${query}`;
 
-        for (const key in params) {
-            query.append(key, String(params[key]));
-        }
-
-        const path = `/api/functions?${query.toString()}`;
-
-        return await makeRequest(path);
+        const data = await requestJSON(path);
+        return data || [];
 
     } catch (err) {
         console.error("[CScout] Error fetching functions:", err);
         return [];
     }
 }
-import net from "net";
 
 
-export function makeRequest(path: string): Promise<any> {
-    return new Promise((resolve) => {
 
-        const client = net.createConnection(
-            { host: "127.0.0.1", port: 8081 },
-            () => {
-                const request =
-                    `GET ${path} HTTP/1.1\r\n` +
-                    `Host: localhost\r\n` +
-                    `Connection: close\r\n\r\n`;
-
-                client.write(request);
-            }
-        );
-
-        let data = "";
-
-        client.on("data", chunk => {
-            data += chunk.toString();
-        });
-
-        client.on("end", () => {
-            try {
-                // Strip HTTP headers — take everything after the first blank line
-                const body = data.split("\r\n\r\n").slice(1).join("\r\n\r\n").trim();
-                const parsed = JSON.parse(body);
-                resolve(parsed);
-            } catch (err) {
-                console.error("[Network] JSON parse error:", err);
-                console.error("[Network] Raw response:", data.substring(0, 500));
-                resolve(null);   // null so callers can distinguish "failed" from "empty array"
-            }
-        });
-
-        client.on("error", (err) => {
-            console.error("[Network] Socket error:", err);
-            resolve(null);
-        });
-    });
-}
 
 export interface CallTreeNode {
     id: string;
@@ -150,5 +106,6 @@ export async function fetchFunctionRelations(params: {
         query.append("depth", String(params.depth));
     }
 
-    return makeRequest(`/api/funlist?${query.toString()}`) as unknown as Promise<FunListResponse>;
+   const data = await requestJSON(`/api/funlist?${query.toString()}`);
+return data as FunListResponse;
 }
