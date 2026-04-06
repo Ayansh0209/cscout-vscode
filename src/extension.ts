@@ -475,7 +475,7 @@ async function generateCsFile(
     }
 
     const hFiles = scanHFiles(workspaceRoot);
-    const ipaths = detectIncludePaths(workspaceRoot, hFiles);
+    const ipaths = detectIncludePaths(workspaceRoot, hFiles, cFiles);
     const projects = detectProjects(workspaceRoot, cFiles);
 
     const config: WorkspaceConfig = {

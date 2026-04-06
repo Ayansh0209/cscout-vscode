@@ -5,14 +5,19 @@ import * as vscode from "vscode";
  * Manages a CScout child process: spawn, readiness detection, and shutdown.
  *
  * CScout prints progress to stderr while processing files, then prints
- * "We are now ready to serve you at http://localhost:<port>"
- * once the HTTP server is up.
+ * "CScout is now ready to serve you at http://localhost:<port>"
+ * once the HTTP server is up. (See cscout.cpp line 4600)
  */
+
+// The exact readiness string CScout emits (from cscout.cpp:4600)
+const READY_SIGNAL = "CScout is now ready to serve";
+
 export class CScoutProcess {
     private proc: child_process.ChildProcess | null = null;
     private stderrBuffer = "";
     private port = 8081;
     private outputChannel: vscode.OutputChannel;
+    private resolved = false;
 
     constructor() {
         this.outputChannel = vscode.window.createOutputChannel("CScout");
@@ -41,10 +46,14 @@ export class CScoutProcess {
 
     /**
      * Start CScout with the given processing script.
-     * Resolves when CScout prints "ready to serve".
-     * Rejects on timeout, exit, or spawn error.
+     * Resolves ONLY when CScout prints the exact readiness message:
+     *   "CScout is now ready to serve you at http://localhost:<port>"
+     * Rejects on timeout, premature exit, or spawn error.
+     *
+     * Guards: calling start() when already running throws immediately.
      */
     async start(csPath: string, workspaceRoot: string): Promise<void> {
+        // Guard: prevent double-start and double-listener attachment
         if (this.isRunning()) {
             throw new Error(
                 "CScout is already running. Stop it first with 'CScout: Stop Analysis Server'."
@@ -52,6 +61,7 @@ export class CScoutProcess {
         }
 
         this.stderrBuffer = "";
+        this.resolved = false;
         this.outputChannel.clear();
         this.outputChannel.show(true);
         this.outputChannel.appendLine(
@@ -68,18 +78,26 @@ export class CScoutProcess {
                 env: { ...process.env },
             });
 
-            // ----- stderr: progress + readiness -----
+            // ----- stderr: progress + readiness detection -----
+            // CScout writes ALL output to stderr. We buffer the
+            // entire stream and only resolve when we see the EXACT
+            // readiness string. Never resolve on a partial chunk.
             this.proc.stderr?.on("data", (data: Buffer) => {
                 const chunk = data.toString();
                 this.stderrBuffer += chunk;
                 this.outputChannel.append(chunk);
 
-                // Detect readiness
-                if (this.stderrBuffer.includes("ready to serve")) {
-                    // Extract port from a message like
-                    // "at http://localhost:8081"
-                    const portMatch =
-                        this.stderrBuffer.match(/:(\d{4,5})/);
+                // Check the accumulated buffer — NOT just the current chunk
+                if (
+                    !this.resolved &&
+                    this.stderrBuffer.includes(READY_SIGNAL)
+                ) {
+                    this.resolved = true;
+                    // Extract port from the full message:
+                    // "CScout is now ready to serve you at http://localhost:8081"
+                    const portMatch = this.stderrBuffer.match(
+                        /localhost:(\d{4,5})/
+                    );
                     if (portMatch) {
                         this.port = parseInt(portMatch[1], 10);
                     }
@@ -87,7 +105,7 @@ export class CScoutProcess {
                 }
             });
 
-            // ----- stdout: not usually used, but capture it -----
+            // ----- stdout: separate handler, no readiness logic -----
             this.proc.stdout?.on("data", (data: Buffer) => {
                 this.outputChannel.append(data.toString());
             });
@@ -102,7 +120,7 @@ export class CScoutProcess {
                 );
 
                 // If we haven't resolved yet, this is an error
-                if (!this.stderrBuffer.includes("ready to serve")) {
+                if (!this.resolved) {
                     const lastLines = this.stderrBuffer
                         .split("\n")
                         .slice(-20)
@@ -134,7 +152,7 @@ export class CScoutProcess {
 
             // ----- timeout for very large projects -----
             setTimeout(() => {
-                if (!this.stderrBuffer.includes("ready to serve")) {
+                if (!this.resolved) {
                     reject(
                         new Error(
                             "CScout took too long to start (>5 min). " +

@@ -118,22 +118,36 @@ export function scanHFiles(workspaceRoot: string): string[] {
 }
 
 /**
- * Detect include paths by collecting directories containing .h files,
- * plus conventional directory names (include, inc, headers).
+ * Detect include paths by collecting:
+ *   1. Every directory containing .h files
+ *   2. Every directory containing .c files (headers often live alongside sources)
+ *   3. Conventional directory names (include, inc, headers, src)
+ *   4. The workspace root itself (as a fallback)
+ *
+ * All paths returned are absolute.
  */
 export function detectIncludePaths(
     workspaceRoot: string,
-    hFiles: string[]
+    hFiles: string[],
+    cFiles: string[] = []
 ): string[] {
     const dirs = new Set<string>();
+
+    // Always include workspace root
+    dirs.add(path.resolve(workspaceRoot));
 
     // Every directory that contains a .h file is a candidate include path
     for (const h of hFiles) {
         dirs.add(path.dirname(path.resolve(h)));
     }
 
+    // Every directory that contains a .c file — headers often live alongside sources
+    for (const c of cFiles) {
+        dirs.add(path.dirname(path.resolve(c)));
+    }
+
     // Also add conventional directory names if they exist
-    const conventional = ["include", "inc", "headers"];
+    const conventional = ["include", "inc", "headers", "src"];
     for (const name of conventional) {
         const candidate = path.join(workspaceRoot, name);
         if (fs.existsSync(candidate)) {
