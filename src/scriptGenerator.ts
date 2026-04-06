@@ -41,6 +41,59 @@ export interface WorkspaceConfig {
 }
 
 // ---------------------------------------------------------------------------
+// host-incs.h resolver
+// ---------------------------------------------------------------------------
+
+/**
+ * Read host-incs.h and resolve any relative `#pragma includepath` directives
+ * to absolute paths (relative to the cscoutHome directory).
+ *
+ * Problem: host-incs.h can contain relative paths like:
+ *   #pragma includepath "../../include/stdc"
+ * These break when our generator changes the CWD via pushd.
+ * By resolving them here, we ensure they always work.
+ *
+ * Returns an array of lines to inline in the .cs file in place of
+ * `#include "host-incs.h"`.
+ */
+function resolveHostIncs(cscoutHome: string): string[] {
+    const incsFile = path.join(cscoutHome, "host-incs.h");
+    const content = fs.readFileSync(incsFile, "utf-8");
+    const result: string[] = [];
+
+    for (const line of content.split("\n")) {
+        const trimmed = line.trim();
+
+        // Match:  #pragma includepath "some/path"
+        const match = trimmed.match(
+            /^#pragma\s+includepath\s+"([^"]+)"\s*$/
+        );
+        if (match) {
+            let incPath = match[1];
+            if (!path.isAbsolute(incPath)) {
+                // Resolve relative to the cscoutHome directory
+                incPath = path.resolve(cscoutHome, incPath);
+            }
+            result.push(`#pragma includepath "${incPath}"`);
+            continue;
+        }
+
+        // Keep other non-empty, non-comment lines as-is
+        // (e.g. the static void _cscout_dummy2 line)
+        if (
+            trimmed.length > 0 &&
+            !trimmed.startsWith("/*") &&
+            !trimmed.startsWith("*") &&
+            !trimmed.startsWith("//")
+        ) {
+            result.push(line);
+        }
+    }
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
 // Generator
 // ---------------------------------------------------------------------------
 
@@ -53,10 +106,10 @@ export interface WorkspaceConfig {
  *
  * Key rules:
  *   - host-defs.h is loaded via  `#pragma process`  (NOT #include)
- *   - host-incs.h is loaded via  `#include`          (NOT #pragma process)
+ *   - host-incs.h is INLINED with resolved absolute paths
  *   - Order per file block:
  *       clear_defines → clear_include → pragma process host-defs.h
- *       → ipaths → defines → #include host-incs.h → pragma process file
+ *       → ipaths → defines → host-incs directives → pragma process file
  *   - ALL paths are absolute
  *   - Every block_enter has a matching block_exit
  *   - Every pushd has a matching popd
@@ -75,6 +128,9 @@ export function generateProcessingScript(config: WorkspaceConfig): string {
     if (!fs.existsSync(incsFile)) {
         throw new Error(`host-incs.h not found at ${incsFile}`);
     }
+
+    // Pre-resolve host-incs.h to avoid relative-path issues
+    const hostIncsLines = resolveHostIncs(config.cscoutHome);
 
     // -----------------------------------------------------------------------
     // Workspace header
@@ -150,8 +206,11 @@ export function generateProcessingScript(config: WorkspaceConfig): string {
                 );
             }
 
-            // host-incs.h via #include (NOT #pragma process!)
-            push(`#include "${incsFile}"`);
+            // host-incs.h — inlined with absolute paths instead of
+            // #include to avoid relative-path resolution issues
+            for (const incLine of hostIncsLines) {
+                push(incLine);
+            }
 
             // Process the actual source file
             push(`#pragma process "${file.path}"`);
