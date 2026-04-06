@@ -13,6 +13,26 @@
   "contributes": {
     "commands": [
       {
+        "command": "cscout.initialize",
+        "title": "CScout: Initialize Project and Start Analysis"
+      },
+      {
+        "command": "cscout.reanalyze",
+        "title": "CScout: Re-run Analysis"
+      },
+      {
+        "command": "cscout.stop",
+        "title": "CScout: Stop Analysis Server"
+      },
+      {
+        "command": "cscout.showScript",
+        "title": "CScout: Show Processing Script"
+      },
+      {
+        "command": "cscout.openWeb",
+        "title": "CScout: Open Web Interface"
+      },
+      {
         "command": "cscout.showIdentifiers",
         "title": "Refresh CScout Identifiers"
       },

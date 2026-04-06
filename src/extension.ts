@@ -1,4 +1,6 @@
 import * as vscode from "vscode";
+import * as fs from "fs";
+import * as path from "path";
 import { CScoutViewProvider } from "./providers/CScoutViewProvider";
 import { fetchIdentifierLocations, IdentifierFilters } from "./services/IdentifierApi";
 import { FILE_FILTERS, FileItem } from "./services/fileApi";
@@ -7,7 +9,25 @@ import { DependencyProvider } from "./providers/depdencyProvider";
 import { FunctionProvider } from "./providers/funcSectionProvider";
 import { FUNCTION_FILTERS } from "./services/FunSectionapi";
 import { renderGraph } from "./webview/renderGrpah";
+import { CScoutProcess } from "./cscoutProcess";
+import { findCscoutHome } from "./cscoutHome";
+import {
+    choosePipeline,
+    scanCFiles,
+    scanHFiles,
+    detectIncludePaths,
+    detectProjects,
+    hasMakefile,
+} from "./projectDetector";
+import { generateProcessingScript, WorkspaceConfig } from "./scriptGenerator";
+
 export let currentIdentifierFilters: IdentifierFilters = {};
+
+// Global CScout process manager — shared across commands
+let cscoutProcess: CScoutProcess | null = null;
+// Path to the last generated .cs file
+let lastCsPath: string | null = null;
+
 export function activate(context: vscode.ExtensionContext) {
 
     console.log("[CScout] Extension activated");
@@ -275,8 +295,220 @@ export function activate(context: vscode.ExtensionContext) {
         })
     );
 
+    // -----------------------------------------------------------------
+    // New commands: Project initialization and CScout management
+    // -----------------------------------------------------------------
+
+    // --- Initialize ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand("cscout.initialize", async () => {
+            await initializeCScout(context);
+        })
+    );
+
+    // --- Re-analyze ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand("cscout.reanalyze", async () => {
+            if (cscoutProcess?.isRunning()) {
+                cscoutProcess.stop();
+            }
+            await initializeCScout(context);
+        })
+    );
+
+    // --- Stop ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand("cscout.stop", () => {
+            if (cscoutProcess?.isRunning()) {
+                cscoutProcess.stop();
+                vscode.window.showInformationMessage("CScout server stopped.");
+            } else {
+                vscode.window.showInformationMessage("CScout is not running.");
+            }
+        })
+    );
+
+    // --- Show Script ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand("cscout.showScript", async () => {
+            if (lastCsPath && fs.existsSync(lastCsPath)) {
+                const doc = await vscode.workspace.openTextDocument(lastCsPath);
+                await vscode.window.showTextDocument(doc);
+            } else {
+                vscode.window.showWarningMessage(
+                    "No processing script generated yet. Run 'CScout: Initialize Project' first."
+                );
+            }
+        })
+    );
+
+    // --- Open Web UI ---
+    context.subscriptions.push(
+        vscode.commands.registerCommand("cscout.openWeb", () => {
+            const port = cscoutProcess?.getPort() ?? 8081;
+            vscode.env.openExternal(
+                vscode.Uri.parse(`http://localhost:${port}`)
+            );
+        })
+    );
+
+}
+
+// ---------------------------------------------------------------------------
+// Core initialization logic
+// ---------------------------------------------------------------------------
+
+async function initializeCScout(
+    context: vscode.ExtensionContext
+): Promise<void> {
+    const workspaceRoot =
+        vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+    if (!workspaceRoot) {
+        vscode.window.showErrorMessage(
+            "No workspace folder open. Open a folder containing C code first."
+        );
+        return;
+    }
+
+    // 1. Find CScout configuration
+    const cscoutHome = findCscoutHome(workspaceRoot);
+    if (!cscoutHome) {
+        vscode.window.showErrorMessage(
+            "CScout headers not found (host-defs.h / host-incs.h). " +
+                "Set CSCOUT_HOME environment variable or create a .cscout directory in your project."
+        );
+        return;
+    }
+
+    // 2. Choose pipeline
+    const pipeline = await choosePipeline(workspaceRoot);
+    let csPath: string;
+
+    await vscode.window.withProgress(
+        {
+            location: vscode.ProgressLocation.Notification,
+            title: "CScout",
+            cancellable: false,
+        },
+        async (progress) => {
+            if (pipeline === "csmake") {
+                // --- csmake pipeline ---
+                progress.report({ message: "Running csmake..." });
+                try {
+                    const { execSync } = await import("child_process");
+                    execSync("make clean", {
+                        cwd: workspaceRoot,
+                        stdio: "ignore",
+                    });
+                } catch {
+                    // make clean might fail if there's no clean target — that's OK
+                }
+                try {
+                    const { execSync } = await import("child_process");
+                    execSync("csmake", {
+                        cwd: workspaceRoot,
+                        timeout: 5 * 60 * 1000,
+                    });
+                    csPath = path.join(workspaceRoot, "make.cs");
+                    if (!fs.existsSync(csPath)) {
+                        throw new Error(
+                            "csmake did not generate make.cs"
+                        );
+                    }
+                } catch (err: any) {
+                    vscode.window.showWarningMessage(
+                        `csmake failed: ${err.message}. Falling back to TypeScript generator.`
+                    );
+                    csPath = await generateCsFile(
+                        workspaceRoot,
+                        cscoutHome
+                    );
+                }
+            } else {
+                // --- TypeScript generator pipeline ---
+                progress.report({
+                    message: "Scanning for C files...",
+                });
+                csPath = await generateCsFile(
+                    workspaceRoot,
+                    cscoutHome
+                );
+            }
+
+            lastCsPath = csPath;
+
+            // 3. Start CScout
+            progress.report({ message: "Starting CScout..." });
+
+            if (!cscoutProcess) {
+                cscoutProcess = new CScoutProcess();
+            } else if (cscoutProcess.isRunning()) {
+                cscoutProcess.stop();
+            }
+
+            try {
+                await cscoutProcess.start(csPath, workspaceRoot);
+                vscode.window.showInformationMessage(
+                    `CScout is ready on port ${cscoutProcess.getPort()}!`
+                );
+            } catch (err: any) {
+                vscode.window.showErrorMessage(
+                    `CScout failed to start: ${err.message}`
+                );
+            }
+        }
+    );
+}
+
+/**
+ * Generate a .cs processing script using the TypeScript generator.
+ */
+async function generateCsFile(
+    workspaceRoot: string,
+    cscoutHome: string
+): Promise<string> {
+    const cFiles = scanCFiles(workspaceRoot);
+    if (cFiles.length === 0) {
+        throw new Error(
+            "No C source files found in this workspace. Open a folder containing C code."
+        );
+    }
+
+    const hFiles = scanHFiles(workspaceRoot);
+    const ipaths = detectIncludePaths(workspaceRoot, hFiles);
+    const projects = detectProjects(workspaceRoot, cFiles);
+
+    const config: WorkspaceConfig = {
+        name: path.basename(workspaceRoot),
+        dir: workspaceRoot,
+        roPrefix: ["/usr/include"],
+        cscoutHome,
+        projects: projects.map((p) => ({
+            name: p.name,
+            dir: p.dir,
+            ipaths,
+            defines: {},
+            files: p.files.map((f) => ({ path: f })),
+        })),
+    };
+
+    const csContent = generateProcessingScript(config);
+
+    // Write to .cscout-vscode/project.cs
+    const outDir = path.join(workspaceRoot, ".cscout-vscode");
+    if (!fs.existsSync(outDir)) {
+        fs.mkdirSync(outDir, { recursive: true });
+    }
+    const csPath = path.join(outDir, "project.cs");
+    fs.writeFileSync(csPath, csContent, "utf-8");
+
+    return csPath;
 }
 
 export function deactivate() {
     console.log("[CScout] Extension deactivated");
+    if (cscoutProcess) {
+        cscoutProcess.dispose();
+        cscoutProcess = null;
+    }
 }
