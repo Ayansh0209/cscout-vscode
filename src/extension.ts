@@ -10,16 +10,14 @@ import { FunctionProvider } from "./providers/funcSectionProvider";
 import { FUNCTION_FILTERS } from "./services/FunSectionapi";
 import { renderGraph } from "./webview/renderGrpah";
 import { CScoutProcess } from "./cscoutProcess";
-import { findCscoutHome } from "./cscoutHome";
 import {
-    choosePipeline,
+    detectPipeline,
+    findExistingPrj,
     scanCFiles,
     scanHFiles,
     detectIncludePaths,
-    detectProjects,
-    hasMakefile,
+    generatePrj,
 } from "./projectDetector";
-import { generateProcessingScript, WorkspaceConfig } from "./scriptGenerator";
 
 export let currentIdentifierFilters: IdentifierFilters = {};
 
@@ -359,7 +357,7 @@ export function activate(context: vscode.ExtensionContext) {
 // ---------------------------------------------------------------------------
 
 async function initializeCScout(
-    context: vscode.ExtensionContext
+    _context: vscode.ExtensionContext
 ): Promise<void> {
     const workspaceRoot =
         vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
@@ -370,19 +368,15 @@ async function initializeCScout(
         return;
     }
 
-    // 1. Find CScout configuration
-    const cscoutHome = findCscoutHome(workspaceRoot);
-    if (!cscoutHome) {
-        vscode.window.showErrorMessage(
-            "CScout headers not found (host-defs.h / host-incs.h). " +
-                "Set CSCOUT_HOME environment variable or create a .cscout directory in your project."
-        );
-        return;
+    // Ensure single CScout instance
+    if (!cscoutProcess) {
+        cscoutProcess = new CScoutProcess();
     }
+    cscoutProcess.showOutput();
 
-    // 2. Choose pipeline
-    const pipeline = await choosePipeline(workspaceRoot);
-    let csPath: string;
+    // Detect pipeline: Makefile → csmake, else → cswc
+    const pipeline = detectPipeline(workspaceRoot);
+    let csPath: string | undefined;
 
     await vscode.window.withProgress(
         {
@@ -391,65 +385,98 @@ async function initializeCScout(
             cancellable: false,
         },
         async (progress) => {
+
+            // =============================================================
+            // Pipeline 1: csmake (Makefile exists)
+            // =============================================================
             if (pipeline === "csmake") {
-                // --- csmake pipeline ---
                 progress.report({ message: "Running csmake..." });
                 try {
-                    const { execSync } = await import("child_process");
-                    execSync("make clean", {
-                        cwd: workspaceRoot,
-                        stdio: "ignore",
-                    });
-                } catch {
-                    // make clean might fail if there's no clean target — that's OK
-                }
-                try {
-                    const { execSync } = await import("child_process");
-                    execSync("csmake", {
-                        cwd: workspaceRoot,
-                        timeout: 5 * 60 * 1000,
-                    });
-                    csPath = path.join(workspaceRoot, "make.cs");
-                    if (!fs.existsSync(csPath)) {
-                        throw new Error(
-                            "csmake did not generate make.cs"
-                        );
-                    }
+                    csPath = await cscoutProcess!.runCsmake(workspaceRoot);
                 } catch (err: any) {
+                    // csmake failed → fall back to cswc
                     vscode.window.showWarningMessage(
-                        `csmake failed: ${err.message}. Falling back to TypeScript generator.`
+                        `csmake failed: ${err.message}. Falling back to cswc.`
                     );
-                    csPath = await generateCsFile(
-                        workspaceRoot,
-                        cscoutHome
-                    );
+                    csPath = undefined;
                 }
-            } else {
-                // --- TypeScript generator pipeline ---
+            }
+
+            // =============================================================
+            // Pipeline 2: cswc with existing .prj file
+            // =============================================================
+            if (!csPath && pipeline === "cswc-existing") {
+                const existingPrj = findExistingPrj(workspaceRoot)!;
                 progress.report({
-                    message: "Scanning for C files...",
+                    message: `Running cswc on ${path.basename(existingPrj)}...`,
                 });
-                csPath = await generateCsFile(
+                try {
+                    csPath = await cscoutProcess!.runCswc(
+                        existingPrj,
+                        workspaceRoot
+                    );
+                } catch (err: any) {
+                    vscode.window.showErrorMessage(
+                        `CScout tools not installed. Please run: sudo make install\n\n${err.message}`
+                    );
+                    return;
+                }
+            }
+
+            // =============================================================
+            // Pipeline 3: auto-generate .prj → cswc (no Makefile, no .prj)
+            // =============================================================
+            if (!csPath) {
+                progress.report({ message: "Scanning for C files..." });
+
+                const cFiles = scanCFiles(workspaceRoot);
+                if (cFiles.length === 0) {
+                    vscode.window.showErrorMessage(
+                        "No C source files found in workspace."
+                    );
+                    return;
+                }
+
+                const hFiles = scanHFiles(workspaceRoot);
+                const ipaths = detectIncludePaths(
                     workspaceRoot,
-                    cscoutHome
+                    hFiles,
+                    cFiles
                 );
+
+                // Auto-generate .prj file
+                progress.report({ message: "Generating project file..." });
+                const prjPath = generatePrj(
+                    workspaceRoot,
+                    cFiles,
+                    ipaths
+                );
+
+                // Run cswc on the generated .prj
+                progress.report({ message: "Running cswc..." });
+                try {
+                    csPath = await cscoutProcess!.runCswc(
+                        prjPath,
+                        workspaceRoot
+                    );
+                } catch (err: any) {
+                    vscode.window.showErrorMessage(
+                        `CScout tools not installed. Please run: sudo make install\n\n${err.message}`
+                    );
+                    return;
+                }
             }
 
             lastCsPath = csPath;
 
-            // 3. Start CScout
-            progress.report({ message: "Starting CScout..." });
-
-            if (!cscoutProcess) {
-                cscoutProcess = new CScoutProcess();
-            } else if (cscoutProcess.isRunning()) {
-                cscoutProcess.stop();
-            }
-
+            // =============================================================
+            // Start CScout server
+            // =============================================================
+            progress.report({ message: "Starting CScout server..." });
             try {
-                await cscoutProcess.start(csPath, workspaceRoot);
+                await cscoutProcess!.startServer(csPath, workspaceRoot);
                 vscode.window.showInformationMessage(
-                    `CScout is ready on port ${cscoutProcess.getPort()}!`
+                    `CScout is ready on port ${cscoutProcess!.getPort()}!`
                 );
             } catch (err: any) {
                 vscode.window.showErrorMessage(
@@ -458,51 +485,6 @@ async function initializeCScout(
             }
         }
     );
-}
-
-/**
- * Generate a .cs processing script using the TypeScript generator.
- */
-async function generateCsFile(
-    workspaceRoot: string,
-    cscoutHome: string
-): Promise<string> {
-    const cFiles = scanCFiles(workspaceRoot);
-    if (cFiles.length === 0) {
-        throw new Error(
-            "No C source files found in this workspace. Open a folder containing C code."
-        );
-    }
-
-    const hFiles = scanHFiles(workspaceRoot);
-    const ipaths = detectIncludePaths(workspaceRoot, hFiles, cFiles);
-    const projects = detectProjects(workspaceRoot, cFiles);
-
-    const config: WorkspaceConfig = {
-        name: path.basename(workspaceRoot),
-        dir: workspaceRoot,
-        roPrefix: ["/usr/include"],
-        cscoutHome,
-        projects: projects.map((p) => ({
-            name: p.name,
-            dir: p.dir,
-            ipaths,
-            defines: {},
-            files: p.files.map((f) => ({ path: f })),
-        })),
-    };
-
-    const csContent = generateProcessingScript(config);
-
-    // Write to .cscout-vscode/project.cs
-    const outDir = path.join(workspaceRoot, ".cscout-vscode");
-    if (!fs.existsSync(outDir)) {
-        fs.mkdirSync(outDir, { recursive: true });
-    }
-    const csPath = path.join(outDir, "project.cs");
-    fs.writeFileSync(csPath, csContent, "utf-8");
-
-    return csPath;
 }
 
 export function deactivate() {

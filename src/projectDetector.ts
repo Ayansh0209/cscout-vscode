@@ -5,18 +5,7 @@ import * as path from "path";
 // Types
 // ---------------------------------------------------------------------------
 
-export interface DetectedProject {
-    /** Human-readable project name (e.g. directory basename). */
-    name: string;
-    /** Absolute path to the project root directory. */
-    dir: string;
-    /** Absolute paths to all .c / .y source files in this project. */
-    files: string[];
-    /** Whether this looks like a library (no main.c found). */
-    isLibrary: boolean;
-}
 
-export type PipelineType = "csmake" | "cswc" | "typescript";
 
 // ---------------------------------------------------------------------------
 // Glob patterns to exclude when scanning for C files
@@ -29,6 +18,8 @@ const EXCLUDE_PATTERNS: RegExp[] = [
     /[/\\]dist[/\\]/,
     /[/\\]CMakeFiles[/\\]/,
     /[/\\]out[/\\]/,
+    /[/\\]\.cscout[/\\]/,
+    /[/\\]\.cscout-vscode[/\\]/,
     /\.pb\.c$/,
     /generated/i,
     /autogen/i,
@@ -69,38 +60,61 @@ function walkSync(dir: string, ext: string): string[] {
 // ---------------------------------------------------------------------------
 
 /**
- * Check whether a Makefile exists in the workspace root.
+ * Detect which pipeline to use.
+ *
+ *   1. Makefile exists         → "csmake"
+ *   2. .prj file exists        → "cswc-existing"
+ *   3. Neither                 → "cswc-generate"
  */
-export function hasMakefile(workspaceRoot: string): boolean {
-    const names = ["Makefile", "makefile", "GNUmakefile"];
-    return names.some((n) => fs.existsSync(path.join(workspaceRoot, n)));
-}
+export type PipelineType = "csmake" | "cswc-existing" | "cswc-generate";
 
-/**
- * Check whether a tool is available on PATH.
- */
-export async function isToolAvailable(tool: string): Promise<boolean> {
-    const { execFile } = await import("child_process");
-    return new Promise((resolve) => {
-        execFile("which", [tool], (err) => {
-            resolve(!err);
-        });
-    });
-}
-
-/**
- * Choose the best pipeline for the given workspace.
- */
-export async function choosePipeline(
-    workspaceRoot: string
-): Promise<PipelineType> {
-    if (hasMakefile(workspaceRoot) && (await isToolAvailable("csmake"))) {
+export function detectPipeline(workspaceRoot: string): PipelineType {
+    // Check for Makefile
+    const makefileNames = ["Makefile", "makefile", "GNUmakefile"];
+    const hasMakefile = makefileNames.some((n) =>
+        fs.existsSync(path.join(workspaceRoot, n))
+    );
+    if (hasMakefile) {
         return "csmake";
     }
-    if (await isToolAvailable("cswc")) {
-        return "cswc";
+
+    // Check for existing .prj file
+    const prjPath = findExistingPrj(workspaceRoot);
+    if (prjPath) {
+        return "cswc-existing";
     }
-    return "typescript";
+
+    // Fallback: we'll generate a .prj
+    return "cswc-generate";
+}
+
+/**
+ * Find an existing .prj workspace definition file in the workspace.
+ * Returns the absolute path, or null if none found.
+ */
+export function findExistingPrj(workspaceRoot: string): string | null {
+    // Check common names
+    const candidates = ["project.prj", "workspace.prj"];
+    for (const name of candidates) {
+        const p = path.join(workspaceRoot, name);
+        if (fs.existsSync(p)) {
+            return p;
+        }
+    }
+
+    // Check for any .prj file in the root
+    try {
+        const entries = fs.readdirSync(workspaceRoot);
+        for (const entry of entries) {
+            if (entry.endsWith(".prj")) {
+                return path.join(workspaceRoot, entry);
+            }
+        }
+    } catch {
+        // ignore
+    }
+
+    return null;
 }
 
 /**
@@ -118,13 +132,7 @@ export function scanHFiles(workspaceRoot: string): string[] {
 }
 
 /**
- * Detect include paths by collecting:
- *   1. Every directory containing .h files
- *   2. Every directory containing .c files (headers often live alongside sources)
- *   3. Conventional directory names (include, inc, headers, src)
- *   4. The workspace root itself (as a fallback)
- *
- * All paths returned are absolute.
+ * Detect include paths from .h file locations and conventional dirs.
  */
 export function detectIncludePaths(
     workspaceRoot: string,
@@ -136,17 +144,17 @@ export function detectIncludePaths(
     // Always include workspace root
     dirs.add(path.resolve(workspaceRoot));
 
-    // Every directory that contains a .h file is a candidate include path
+    // Every directory containing a .h file
     for (const h of hFiles) {
         dirs.add(path.dirname(path.resolve(h)));
     }
 
-    // Every directory that contains a .c file — headers often live alongside sources
+    // Every directory containing a .c file
     for (const c of cFiles) {
         dirs.add(path.dirname(path.resolve(c)));
     }
 
-    // Also add conventional directory names if they exist
+    // Conventional directory names
     const conventional = ["include", "inc", "headers", "src"];
     for (const name of conventional) {
         const candidate = path.join(workspaceRoot, name);
@@ -159,56 +167,51 @@ export function detectIncludePaths(
 }
 
 /**
- * Group .c files into logical projects using heuristics:
+ * Generate a CScout .prj workspace definition file.
  *
- * 1. Look for files named main.c — each is likely its own executable.
- * 2. If multiple main.c exist, each one and its directory siblings form a project.
- * 3. If exactly one main.c, all .c files form a single project.
- * 4. If no main.c found, treat it as a library (single project, flagged).
+ * The .prj format is the human-readable input to `cswc` (the CScout
+ * workspace compiler). cswc compiles it into a .cs processing script.
+ *
+ * @param workspaceRoot  Absolute path to the workspace root
+ * @param cFiles         Absolute paths to all .c source files
+ * @param ipaths         Absolute include paths
+ * @returns              The path to the written .prj file
  */
-export function detectProjects(
+export function generatePrj(
     workspaceRoot: string,
-    cFiles: string[]
-): DetectedProject[] {
-    const mainFiles = cFiles.filter(
-        (f) => path.basename(f) === "main.c"
+    cFiles: string[],
+    ipaths: string[]
+): string {
+    const lines: string[] = [];
+
+    lines.push(`workspace auto {`);
+    lines.push(`    cd "${workspaceRoot}"`);
+    lines.push(``);
+    lines.push(`    project app {`);
+
+    // Include paths
+    for (const ipath of ipaths) {
+        lines.push(`        ipath "${ipath}"`);
+    }
+
+    // File list — use paths relative to workspaceRoot
+    const relFiles = cFiles.map((f) =>
+        path.relative(workspaceRoot, f)
     );
 
-    if (mainFiles.length > 1) {
-        // Multiple executables — each main.c and its siblings are one project
-        return mainFiles.map((main) => {
-            const dir = path.dirname(main);
-            const siblings = cFiles.filter(
-                (f) => path.dirname(f) === dir
-            );
-            return {
-                name: path.basename(dir),
-                dir,
-                files: siblings,
-                isLibrary: false,
-            };
-        });
+    // Emit files in groups of 5 per line for readability
+    for (let i = 0; i < relFiles.length; i += 5) {
+        const batch = relFiles.slice(i, i + 5).join(" ");
+        lines.push(`        file ${batch}`);
     }
 
-    if (mainFiles.length === 1) {
-        // Single executable — all .c files in one project
-        return [
-            {
-                name: path.basename(workspaceRoot),
-                dir: workspaceRoot,
-                files: cFiles,
-                isLibrary: false,
-            },
-        ];
-    }
+    lines.push(`    }`);
+    lines.push(`}`);
+    lines.push(``);
 
-    // No main.c found — could be a library
-    return [
-        {
-            name: path.basename(workspaceRoot),
-            dir: workspaceRoot,
-            files: cFiles,
-            isLibrary: true,
-        },
-    ];
+    const prjContent = lines.join("\n");
+    const prjPath = path.join(workspaceRoot, "project.prj");
+    fs.writeFileSync(prjPath, prjContent, "utf-8");
+
+    return prjPath;
 }

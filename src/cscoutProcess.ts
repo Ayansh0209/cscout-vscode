@@ -1,69 +1,207 @@
 import * as child_process from "child_process";
+import * as fs from "fs";
 import * as vscode from "vscode";
 
 /**
- * Manages a CScout child process: spawn, readiness detection, and shutdown.
+ * Manages CScout tool processes: csmake, cswc, and the cscout server.
  *
- * CScout prints progress to stderr while processing files, then prints
- * "CScout is now ready to serve you at http://localhost:<port>"
- * once the HTTP server is up. (See cscout.cpp line 4600)
+ * Handles:
+ *   - Running csmake (make clean → csmake → make.cs)
+ *   - Running cswc   (project.prj → project.cs via stdout pipe)
+ *   - Spawning cscout server and detecting readiness
+ *   - Process lifecycle (single instance, SIGTERM cleanup)
  */
 
-// The exact readiness string CScout emits (from cscout.cpp:4600)
+// The exact readiness string CScout emits (cscout.cpp line 4600)
 const READY_SIGNAL = "CScout is now ready to serve";
 
 export class CScoutProcess {
     private proc: child_process.ChildProcess | null = null;
     private stderrBuffer = "";
     private port = 8081;
-    private outputChannel: vscode.OutputChannel;
     private resolved = false;
+    private outputChannel: vscode.OutputChannel;
 
     constructor() {
         this.outputChannel = vscode.window.createOutputChannel("CScout");
     }
 
-    /**
-     * Returns true if a CScout process is currently running.
-     */
+    // -----------------------------------------------------------------------
+    // Status queries
+    // -----------------------------------------------------------------------
+
     isRunning(): boolean {
         return this.proc !== null && this.proc.exitCode === null;
     }
 
-    /**
-     * Returns the port CScout is listening on.
-     */
     getPort(): number {
         return this.port;
     }
 
+    // -----------------------------------------------------------------------
+    // Pipeline runners
+    // -----------------------------------------------------------------------
+
     /**
-     * Returns the accumulated stderr output (useful for error diagnostics).
+     * Run `make clean` followed by `csmake` in the workspace.
+     *
+     * csmake spies on the make process and generates `make.cs`.
+     * Returns the path to `make.cs` on success.
+     * Throws on failure (caller should fall back to cswc).
      */
-    getStderrOutput(): string {
-        return this.stderrBuffer;
+    async runCsmake(workspaceRoot: string): Promise<string> {
+        this.outputChannel.appendLine("[Pipeline] Running csmake pipeline...");
+
+        // Step 1: make clean (best effort — ignore errors)
+        try {
+            this.outputChannel.appendLine("[Pipeline] Running make clean...");
+            child_process.execSync("make clean", {
+                cwd: workspaceRoot,
+                stdio: "ignore",
+                timeout: 30_000,
+            });
+        } catch {
+            this.outputChannel.appendLine(
+                "[Pipeline] make clean skipped (no clean target)"
+            );
+        }
+
+        // Step 2: csmake
+        this.outputChannel.appendLine("[Pipeline] Running csmake...");
+        return new Promise<string>((resolve, reject) => {
+            const proc = child_process.spawn("csmake", [], {
+                cwd: workspaceRoot,
+            });
+
+            let stderr = "";
+
+            proc.stdout?.on("data", (data: Buffer) => {
+                this.outputChannel.append(data.toString());
+            });
+
+            proc.stderr?.on("data", (data: Buffer) => {
+                const chunk = data.toString();
+                stderr += chunk;
+                this.outputChannel.append(chunk);
+            });
+
+            proc.on("error", (err: NodeJS.ErrnoException) => {
+                if (err.code === "ENOENT") {
+                    reject(new Error("csmake not found in PATH."));
+                } else {
+                    reject(err);
+                }
+            });
+
+            proc.on("exit", (code) => {
+                const csPath = `${workspaceRoot}/make.cs`;
+                if (code === 0 && fs.existsSync(csPath)) {
+                    this.outputChannel.appendLine(
+                        "[Pipeline] csmake succeeded → make.cs"
+                    );
+                    resolve(csPath);
+                } else {
+                    reject(
+                        new Error(
+                            `csmake exited with code ${code}.\n${stderr.slice(-500)}`
+                        )
+                    );
+                }
+            });
+        });
     }
 
     /**
-     * Start CScout with the given processing script.
-     * Resolves ONLY when CScout prints the exact readiness message:
-     *   "CScout is now ready to serve you at http://localhost:<port>"
-     * Rejects on timeout, premature exit, or spawn error.
+     * Run `cswc` on a .prj file to produce a .cs processing script.
      *
-     * Guards: calling start() when already running throws immediately.
+     * cswc writes the .cs content to stdout. We pipe it into project.cs.
+     * Returns the path to `project.cs` on success.
      */
-    async start(csPath: string, workspaceRoot: string): Promise<void> {
-        // Guard: prevent double-start and double-listener attachment
-        if (this.isRunning()) {
-            throw new Error(
-                "CScout is already running. Stop it first with 'CScout: Stop Analysis Server'."
+    async runCswc(
+        prjPath: string,
+        workspaceRoot: string
+    ): Promise<string> {
+        this.outputChannel.appendLine(
+            `[Pipeline] Running cswc ${prjPath}...`
+        );
+
+        return new Promise<string>((resolve, reject) => {
+            const proc = child_process.spawn("cswc", [prjPath], {
+                cwd: workspaceRoot,
+            });
+
+            const csPath = `${workspaceRoot}/project.cs`;
+            const outStream = fs.createWriteStream(csPath);
+            let stderr = "";
+
+            // cswc writes the .cs content to stdout
+            proc.stdout?.pipe(outStream);
+
+            proc.stderr?.on("data", (data: Buffer) => {
+                const chunk = data.toString();
+                stderr += chunk;
+                this.outputChannel.append(chunk);
+            });
+
+            proc.on("error", (err: NodeJS.ErrnoException) => {
+                if (err.code === "ENOENT") {
+                    reject(
+                        new Error(
+                            "CScout tools not installed. Please run: sudo make install"
+                        )
+                    );
+                } else {
+                    reject(err);
+                }
+            });
+
+            proc.on("exit", (code) => {
+                outStream.end(() => {
+                    if (code === 0 && fs.existsSync(csPath)) {
+                        this.outputChannel.appendLine(
+                            "[Pipeline] cswc succeeded → project.cs"
+                        );
+                        resolve(csPath);
+                    } else {
+                        reject(
+                            new Error(
+                                `cswc exited with code ${code}.\n${stderr.slice(-500)}`
+                            )
+                        );
+                    }
+                });
+            });
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // CScout server
+    // -----------------------------------------------------------------------
+
+    /**
+     * Start the CScout analysis server with the given .cs file.
+     *
+     * Resolves ONLY when CScout prints:
+     *   "CScout is now ready to serve you at http://localhost:<port>"
+     *
+     * Guards: kills any previous process before starting.
+     */
+    async startServer(
+        csPath: string,
+        workspaceRoot: string
+    ): Promise<void> {
+        // Kill previous process if running
+        if (this.proc) {
+            this.outputChannel.appendLine(
+                "[CScout] Killing previous CScout process..."
             );
+            this.proc.kill("SIGTERM");
+            this.proc = null;
         }
 
         this.stderrBuffer = "";
         this.resolved = false;
-        this.outputChannel.clear();
-        this.outputChannel.show(true);
+        this.outputChannel.appendLine("");
         this.outputChannel.appendLine(
             `[CScout] Starting: cscout ${csPath}`
         );
@@ -79,22 +217,18 @@ export class CScoutProcess {
             });
 
             // ----- stderr: progress + readiness detection -----
-            // CScout writes ALL output to stderr. We buffer the
-            // entire stream and only resolve when we see the EXACT
-            // readiness string. Never resolve on a partial chunk.
             this.proc.stderr?.on("data", (data: Buffer) => {
                 const chunk = data.toString();
                 this.stderrBuffer += chunk;
                 this.outputChannel.append(chunk);
 
-                // Check the accumulated buffer — NOT just the current chunk
+                // Check accumulated buffer for exact readiness signal
                 if (
                     !this.resolved &&
                     this.stderrBuffer.includes(READY_SIGNAL)
                 ) {
                     this.resolved = true;
-                    // Extract port from the full message:
-                    // "CScout is now ready to serve you at http://localhost:8081"
+                    // Extract port: "localhost:8081"
                     const portMatch = this.stderrBuffer.match(
                         /localhost:(\d{4,5})/
                     );
@@ -105,21 +239,20 @@ export class CScoutProcess {
                 }
             });
 
-            // ----- stdout: separate handler, no readiness logic -----
+            // ----- stdout -----
             this.proc.stdout?.on("data", (data: Buffer) => {
                 this.outputChannel.append(data.toString());
             });
 
-            // ----- process exit -----
+            // ----- exit -----
             this.proc.on("exit", (code, signal) => {
-                const exitMsg = signal
+                const msg = signal
                     ? `killed by signal ${signal}`
                     : `exited with code ${code}`;
                 this.outputChannel.appendLine(
-                    `\n[CScout] Process ${exitMsg}`
+                    `\n[CScout] Process ${msg}`
                 );
 
-                // If we haven't resolved yet, this is an error
                 if (!this.resolved) {
                     const lastLines = this.stderrBuffer
                         .split("\n")
@@ -127,7 +260,7 @@ export class CScoutProcess {
                         .join("\n");
                     reject(
                         new Error(
-                            `CScout ${exitMsg}.\n\nLast output:\n${lastLines}`
+                            `CScout ${msg}.\n\nLast output:\n${lastLines}`
                         )
                     );
                 }
@@ -135,13 +268,13 @@ export class CScoutProcess {
                 this.proc = null;
             });
 
-            // ----- spawn error (e.g. cscout not found) -----
+            // ----- spawn error -----
             this.proc.on("error", (err: NodeJS.ErrnoException) => {
                 if (err.code === "ENOENT") {
                     reject(
                         new Error(
                             "cscout not found in PATH. " +
-                                "Please install CScout: run 'sudo make install' from the CScout repo."
+                                "Please run: sudo make install"
                         )
                     );
                 } else {
@@ -150,13 +283,13 @@ export class CScoutProcess {
                 this.proc = null;
             });
 
-            // ----- timeout for very large projects -----
+            // ----- timeout -----
             setTimeout(() => {
                 if (!this.resolved) {
                     reject(
                         new Error(
                             "CScout took too long to start (>5 min). " +
-                                "Check the CScout output channel for errors."
+                                "Check the CScout output channel."
                         )
                     );
                 }
@@ -164,9 +297,10 @@ export class CScoutProcess {
         });
     }
 
-    /**
-     * Stop the running CScout process.
-     */
+    // -----------------------------------------------------------------------
+    // Lifecycle
+    // -----------------------------------------------------------------------
+
     stop(): void {
         if (this.proc) {
             this.outputChannel.appendLine(
@@ -177,9 +311,10 @@ export class CScoutProcess {
         }
     }
 
-    /**
-     * Dispose of the output channel.
-     */
+    showOutput(): void {
+        this.outputChannel.show(true);
+    }
+
     dispose(): void {
         this.stop();
         this.outputChannel.dispose();
